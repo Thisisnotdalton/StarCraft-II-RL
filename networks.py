@@ -1,7 +1,7 @@
 import tensorflow as tf
 import numpy as np
 from pysc2.lib import actions, features
-from utils import print_tensors, discount_rewards
+from utils import Constants, print_tensors, discount_rewards
 
 
 class StateNet:
@@ -21,10 +21,10 @@ class StateNet:
         # The following assumes that we will stack our minimap and screen features (and they will have the same size)
         with tf.variable_scope('State-{}'.format(scope)):
             self.structured_observation = tf.placeholder(tf.float32, [None, 11], 'StructuredObservation')
-            self.single_select = tf.placeholder(tf.float32, [None, 1, UNIT_ELEMENTS], 'SingleSelect')
-            self.cargo = tf.placeholder(tf.float32, [None, max_cargo, UNIT_ELEMENTS], 'Cargo')
-            self.multi_select = tf.placeholder(tf.float32, [None, max_multi_select, UNIT_ELEMENTS], 'Multiselect')
-            self.build_queue = tf.placeholder(tf.float32, [None, max_build_queue, UNIT_ELEMENTS], 'BuildQueue')
+            self.single_select = tf.placeholder(tf.float32, [None, 1, Constants.UNIT_ELEMENTS], 'SingleSelect')
+            self.cargo = tf.placeholder(tf.float32, [None, max_cargo, Constants.UNIT_ELEMENTS], 'Cargo')
+            self.multi_select = tf.placeholder(tf.float32, [None, max_multi_select, Constants.UNIT_ELEMENTS], 'Multiselect')
+            self.build_queue = tf.placeholder(tf.float32, [None, max_build_queue, Constants.UNIT_ELEMENTS], 'BuildQueue')
             self.units = tf.concat([self.single_select,
                                     self.multi_select,
                                     self.cargo,
@@ -38,9 +38,9 @@ class StateNet:
                                      name='Actions')
             self.nonspatial_features = tf.concat([
                 self.structured_observation,
-                tf.reshape(self.units, [-1, UNIT_ELEMENTS * (1 + sum(self.variable_feature_sizes.values()))]),
+                tf.reshape(self.units, [-1, Constants.UNIT_ELEMENTS * (1 + sum(self.variable_feature_sizes.values()))]),
                 tf.reshape(self.control_groups, [-1, 20]),
-                tf.reshape(self.actions, [-1, 2 * nonspatial_actions])
+                tf.reshape(self.actions, [-1, 2 * self.action_size])
             ], axis=1, name='NonspatialFeatures')
 
             self.screen_features = tf.placeholder(tf.float32,

@@ -3,27 +3,14 @@ import numpy as np
 from pysc2.agents.base_agent import BaseAgent
 from pysc2.lib import actions
 from pysc2.env import environment
-from utils import print_tensors, discount_rewards
-
-DEFAULT_ACTIONS = [
-    0,  # no_op                                              ()
-    1,  # move_camera                                        (1/minimap [64, 64])
-    5,  # select_unit                                        (8/select_unit_act [4]; 9/select_unit_id [500])
-    7,  # select_army                                        (7/select_add [2])
-    331,  # Move_screen                                        (3/queued [2]; 0/screen [84, 84])
-    332  # Move_minimap                                       (3/queued [2]; 1/minimap [64, 64])
-]
-
-UNIT_ELEMENTS = 7
-MAXIMUM_CARGO = 10
-MAXIMUM_BUILD_QUEUE = 10
-MAXIMUM_MULTI_SELECT = 10
+from utils import Constants, print_tensors, discount_rewards
+from networks import StateNet, RecurrentNet, A3CNet
 
 
 class Brain:
-    def __init__(self, race="T", actions=DEFAULT_ACTIONS):
+    def __init__(self, race="T", action_set=Constants.DEFAULT_ACTIONS):
         self.race = race
-        self.actions = actions
+        self.action_set = sorted(action_set)
 
     def reset(self):
         pass
@@ -98,8 +85,8 @@ class SimpleTrainer:
 
 
 class SimpleBrain(Brain):
-    def __init__(self, scope, race="T", actions=DEFAULT_ACTIONS, step_buffer_size=30, epsilon=0.25, noop_rate=7):
-        super().__init__(race, actions)
+    def __init__(self, scope, race="T", action_set=Constants.DEFAULT_ACTIONS, step_buffer_size=30, epsilon=0.25, noop_rate=7):
+        super().__init__(race, action_set)
         self.state_net = StateNet(scope)
         self.printed = False
         self.simple_net = SimpleNet(scope, self.state_net)
@@ -134,10 +121,8 @@ class SimpleBrain(Brain):
         self.noop_count = 0
         self.previous_state = None
         self.episode_rewards = 0
-        # self.step_count = 0
 
     def train(self):
-        # do some data formatting
         feed_dict = {
             self.simple_trainer.reward: discount_rewards([reward for state, reward, x, y in self.step_buffer]),
             self.simple_trainer.chosen_x: [x for state, reward, x, y in self.step_buffer],
@@ -195,12 +180,11 @@ class SimpleBrain(Brain):
         # the shapes of some features depend on the state (eg. shape of multi_select depends on number of units)
         # since tf requires fixed input shapes, we set a maximum size then pad the input if it falls short
         processed_features = {}
-        # for feature_label, feature in observation.observation.items():
         for feature_label in self.feature_placeholders:
-            feature = observation.observation[feature_label]
+            feature = features[feature_label]
             if feature_label in ['available_actions', 'last_actions']:
-                actions = np.zeros(len(self.actions))
-                for i, action in enumerate(self.actions):
+                actions = np.zeros(len(self.action_set))
+                for i, action in enumerate(self.action_set):
                     if action in feature:
                         actions[i] = 1
                 feature = actions
@@ -209,7 +193,7 @@ class SimpleBrain(Brain):
                     padding = np.zeros(
                         (self.state_net.variable_feature_sizes[feature_label] - len(feature), UNIT_ELEMENTS))
                     feature = np.concatenate((feature, padding))
-                feature = feature.reshape(-1, UNIT_ELEMENTS)
+                feature = feature.reshape(-1, Constants.UNIT_ELEMENTS)
             placeholder = self.feature_placeholders[feature_label]
             processed_features[placeholder] = np.expand_dims(feature, axis=0)
         return reward, processed_features, episode_end
