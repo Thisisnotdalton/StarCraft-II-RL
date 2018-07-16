@@ -1,16 +1,16 @@
 import tensorflow as tf
 import numpy as np
-from pysc2.lib import actions, features
-from utils import Constants, print_tensors, discount_rewards
+from pysc2.lib import actions
+from utils import Constants, print_tensors
 
 
 class StateNet:
-    def __init__(self, scope, action_size,
-                 max_multi_select,
-                 max_cargo,
-                 max_build_queue,
+    def __init__(self, scope, action_size=len(Constants.DEFAULT_ACTIONS),
+                 max_multi_select=Constants.MAXIMUM_MULTI_SELECT,
+                 max_cargo=Constants.MAXIMUM_CARGO,
+                 max_build_queue=Constants.MAXIMUM_BUILD_QUEUE,
                  resolution=84, screen_channels=17, minimap_channels=7,
-                 l2_scale=0, hidden_size=128, init=tf.contrib.layers.xavier_initializer()):
+                 l2_scale=0.001, hidden_size=128, init=tf.contrib.layers.xavier_initializer()):
         self.resolution = resolution
         self.action_size = action_size
         self.variable_feature_sizes = {
@@ -19,12 +19,16 @@ class StateNet:
             'build_queue': max_build_queue
         }
         # The following assumes that we will stack our minimap and screen features (and they will have the same size)
-        with tf.variable_scope('State-{}'.format(scope)):
+        with tf.variable_scope(scope):
             self.structured_observation = tf.placeholder(tf.float32, [None, 11], 'StructuredObservation')
             self.single_select = tf.placeholder(tf.float32, [None, 1, Constants.UNIT_ELEMENTS], 'SingleSelect')
             self.cargo = tf.placeholder(tf.float32, [None, max_cargo, Constants.UNIT_ELEMENTS], 'Cargo')
-            self.multi_select = tf.placeholder(tf.float32, [None, max_multi_select, Constants.UNIT_ELEMENTS], 'Multiselect')
-            self.build_queue = tf.placeholder(tf.float32, [None, max_build_queue, Constants.UNIT_ELEMENTS], 'BuildQueue')
+            self.multi_select = tf.placeholder(tf.float32,
+                                               [None, max_multi_select, Constants.UNIT_ELEMENTS],
+                                               'MultiSelect')
+            self.build_queue = tf.placeholder(tf.float32,
+                                              [None, max_build_queue, Constants.UNIT_ELEMENTS],
+                                              'BuildQueue')
             self.units = tf.concat([self.single_select,
                                     self.multi_select,
                                     self.cargo,
@@ -88,7 +92,7 @@ class StateNet:
 
 class RecurrentNet:
     def __init__(self, scope, state_net, lstm_size=256):
-        with tf.variable_scope('RNN-{}'.format(scope)):
+        with tf.variable_scope(scope):
             lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(lstm_size)
             current_init = np.zeros((1, lstm_cell.state_size.c), np.float32)
             hidden_init = np.zeros((1, lstm_cell.state_size.h), np.float32)
@@ -97,10 +101,9 @@ class RecurrentNet:
             hidden_in = tf.placeholder(tf.float32, [1, lstm_cell.state_size.h])
             self.state_in = (current_in, hidden_in)
             rnn_in = tf.expand_dims(state_net.output, [0])
-            step_size = tf.shape(state_net.structured_observation.shape)[:1]
             state_in = tf.contrib.rnn.LSTMStateTuple(current_in, hidden_in)
             lstm_outputs, lstm_state = tf.nn.dynamic_rnn(
-                lstm_cell, rnn_in, initial_state=state_in, sequence_length=step_size,
+                lstm_cell, rnn_in, initial_state=state_in,
                 time_major=False)
             lstm_current, lstm_hidden = lstm_state
             self.state_out = (lstm_current[:1, :], lstm_hidden[:1, :])
@@ -110,7 +113,7 @@ class RecurrentNet:
 
 class A3CNet:
     def __init__(self, scope, state_net, rnn):
-        with tf.variable_scope('A3C-{}'.format(scope)):
+        with tf.variable_scope(scope):
             with tf.variable_scope('Critic-{}'.format(scope)):
                 self.value = tf.layers.dense(rnn.output, 1, activation=None)
             with tf.variable_scope('Actor-{}'.format(scope)):
@@ -122,7 +125,7 @@ class A3CNet:
                         tf.layers.dense(
                             inputs=rnn.output, units=size,
                             activation=tf.nn.softmax,
-                            name='{}[{}]'.format(argument.name, dimension)
+                            name='{}-{}'.format(argument.name, dimension)
                         )
                         for dimension, size in enumerate(argument.sizes)
                     ]
@@ -135,8 +138,8 @@ class A3CWorker(A3CNet):
                  entropy_weight=0.01, gradient_norm=40,
                  optimizer=tf.train.AdamOptimizer(learning_rate=0.001)):
         super().__init__(scope, state_net, rnn)
-        with tf.variable_scope('A3C-Worker-{}'.format(scope)):
-            self.value_target = tf.placeholder(tf.float32, [None])
+        with tf.variable_scope(scope):
+            self.value_target = tf.placeholder(tf.float32, [None, 1])
             self.advantages = tf.placeholder(tf.float32, [None])
 
             self.chosen_action = tf.placeholder(tf.int32, [None], name='ChosenAction')
@@ -152,7 +155,7 @@ class A3CWorker(A3CNet):
             entropy_action = -tf.reduce_sum(self.policy * tf.log(self.policy), name='EntropyAction')
             self.chosen_arguments = {}
             self.used_arguments = {}
-            zero = tf.constant(0, tf.int32, [None], 'Zero')
+            zero = tf.constant(0, tf.float32, shape=[1], name='Zero')
             responsible_arguments = zero
             entropy_arguments = zero
             arguments_loss = zero
@@ -160,30 +163,33 @@ class A3CWorker(A3CNet):
                 self.chosen_arguments[argument.name] = []
                 self.used_arguments[argument.name] = []
                 for dimension, size in enumerate(argument.sizes):
-                    chosen_argument = tf.placeholder_with_default(zero,
-                                                                  name='Chosen{}[{}]'.format(argument.name,
-                                                                                             dimension))
+                    chosen_argument = tf.placeholder_with_default(tf.cast(zero, tf.int32),
+                                                                  shape=[None],
+                                                                  name='Chosen{}-{}'.format(argument.name,
+                                                                                            dimension))
                     self.chosen_arguments[argument.name].append(chosen_argument)
                     chosen_argument_one_hot = tf.one_hot(chosen_argument,
-                                                         size, dtype=tf.float32,
-                                                         name='ChosenOneHot{}[{}]'.format(argument.name,
-                                                                                          dimension))
-                    used_argument = tf.placeholder_with_default(zero,
-                                                                name='Used{}[{}]'.format(argument.name,
+                                                         size, dtype=tf.int32,
+                                                         name='ChosenOneHot{}-{}'.format(argument.name,
                                                                                          dimension))
+                    used_argument = tf.placeholder_with_default(zero,
+                                                                shape=[None],
+                                                                name='Used{}-{}'.format(argument.name,
+                                                                                        dimension))
                     self.used_arguments[argument.name].append(used_argument)
-                    responsible_arguments += tf.reduce_sum(used_argument * chosen_argument_one_hot *
+                    responsible_arguments += tf.reduce_sum(used_argument *
+                                                           tf.cast(chosen_argument_one_hot, tf.float32) *
                                                            self.arguments[argument.name][dimension],
-                                                           axis=[1], name='Responsible{}[{}]'.format(argument.name,
-                                                                                                     dimension))
+                                                           axis=[1], name='Responsible{}-{}'.format(argument.name,
+                                                                                                    dimension))
                     arguments_loss -= tf.reduce_sum(used_argument * tf.log(responsible_arguments) * self.advantages,
-                                                    name='{}[{}]Loss'.format(argument.name,
-                                                                             dimension))
+                                                    name='{}-{}Loss'.format(argument.name,
+                                                                            dimension))
                     entropy_arguments -= tf.reduce_sum(used_argument *
                                                        self.arguments[argument.name][dimension] *
                                                        tf.log(self.arguments[argument.name][dimension]),
-                                                       axis=[1], name='Entropy{}[{}]'.format(argument.name,
-                                                                                             dimension))
+                                                       axis=[1], name='Entropy{}-{}'.format(argument.name,
+                                                                                            dimension))
             self.value_loss = tf.losses.mean_squared_error(self.value_target, self.value, scope)
             self.entropy = entropy_action + entropy_arguments
             self.policy_loss = action_loss + arguments_loss
