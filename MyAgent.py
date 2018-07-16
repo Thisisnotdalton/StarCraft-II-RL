@@ -4,7 +4,7 @@ from pysc2.agents.base_agent import BaseAgent
 from pysc2.lib import actions
 from pysc2.env import environment
 from utils import Constants, print_tensors, discount_rewards
-from networks import StateNet, RecurrentNet, A3CNet
+from networks import StateNet, RecurrentNet, A3CNet, A3CWorker
 
 
 class Brain:
@@ -35,62 +35,12 @@ class MyAgent(BaseAgent):
         return actions.FunctionCall(action, params)
 
 
-class SimpleNet:
-    def __init__(self, scope, state_net, resolution=84):
-        self.resolution = resolution
-        self.state_net = state_net
-        with tf.variable_scope(scope):
-            self.input = state_net.output
-            self.hidden_layer = tf.layers.dense(self.input, 128, activation=tf.nn.relu,
-                                                kernel_initializer=tf.random_normal_initializer,
-                                                bias_initializer=tf.random_normal_initializer,
-                                                name='SimpleHidden')
-            self.raw_output_x = tf.layers.dense(self.hidden_layer, resolution, activation=tf.nn.relu,
-                                                kernel_initializer=tf.random_normal_initializer,
-                                                bias_initializer=tf.random_normal_initializer,
-                                                name='RawOutputX')
-            self.raw_output_y = tf.layers.dense(self.hidden_layer, resolution, activation=tf.nn.relu,
-                                                kernel_initializer=tf.random_normal_initializer,
-                                                bias_initializer=tf.random_normal_initializer,
-                                                name='RawOutputY')
-            self.soft_output_x = tf.nn.softmax(self.raw_output_x)
-            self.soft_output_y = tf.nn.softmax(self.raw_output_y)
-            self.x = tf.argmax(self.soft_output_x, axis=1)
-            self.y = tf.argmax(self.soft_output_y, axis=1)
-            self.output = self.x, self.y
-            self.value = tf.layers.dense(self.hidden_layer, 1, activation=tf.nn.relu, name='Value')
-            print_tensors(self)
-
-
-class SimpleTrainer:
-    def __init__(self, scope, simple_net,
-                 trainer=tf.train.AdamOptimizer(learning_rate=0.001)):
-        with tf.variable_scope(scope):
-            self.chosen_x = tf.placeholder(tf.int32, [None, ])
-            self.chosen_y = tf.placeholder(tf.int32, [None, ])
-            self.chosen_x_one_hot = tf.one_hot(self.chosen_x, simple_net.resolution)
-            self.chosen_y_one_hot = tf.one_hot(self.chosen_y, simple_net.resolution)
-
-            self.reward = tf.placeholder(tf.float32, [None, ], name='ValueTarget')
-            self.value_loss = tf.reduce_mean(simple_net.value - self.reward)
-            self.entropy_loss_x = tf.multiply(simple_net.soft_output_x, self.chosen_x_one_hot)
-            self.entropy_loss_y = tf.multiply(simple_net.soft_output_y, self.chosen_x_one_hot)
-
-            self.entropy_loss_x = tf.reduce_mean(self.entropy_loss_x) * self.reward
-            self.entropy_loss_y = tf.reduce_mean(self.entropy_loss_y) * self.reward
-
-            self.loss = self.entropy_loss_x + self.entropy_loss_y + self.value_loss
-
-            self.train_op = trainer.minimize(self.loss)
-
-
-class SimpleBrain(Brain):
-    def __init__(self, scope, race="T", action_set=Constants.DEFAULT_ACTIONS, step_buffer_size=30, epsilon=0.25, noop_rate=7):
+class A3CBrain(Brain):
+    def __init__(self, scope, race="T", action_set=Constants.DEFAULT_ACTIONS, step_buffer_size=30):
         super().__init__(race, action_set)
-        self.state_net = StateNet(scope)
-        self.printed = False
-        self.simple_net = SimpleNet(scope, self.state_net)
-        self.simple_trainer = SimpleTrainer(scope, self.simple_net)
+        self.state_net = StateNet(scope, action_size=len(self.action_set))
+        self.rnn = RecurrentNet(scope, self.state_net)
+        self.a3c_net = A3CWorker(scope, self.state_net, self.rnn)
         self.sess = tf.Session()
         self.sess.run(tf.global_variables_initializer())
         self.feature_placeholders = {
@@ -107,70 +57,17 @@ class SimpleBrain(Brain):
         }
         self.step_buffer_size = step_buffer_size
         self.step_buffer = []
-        self.epsilon = epsilon
-        self.noop_rate = noop_rate
-        self.noop_count = 0
-        # step buffer full of (previous_state, reward)
-        self.previous_state = None
-        self.step_count = 0
-        self.episode_rewards = 0
-        self.losses = []
 
     def reset(self):
         self.step_buffer.clear()
-        self.noop_count = 0
-        self.previous_state = None
-        self.episode_rewards = 0
 
     def train(self):
-        feed_dict = {
-            self.simple_trainer.reward: discount_rewards([reward for state, reward, x, y in self.step_buffer]),
-            self.simple_trainer.chosen_x: [x for state, reward, x, y in self.step_buffer],
-            self.simple_trainer.chosen_y: [y for state, reward, x, y in self.step_buffer]
-
-        }
-        for text_label, feature_label in self.feature_placeholders.items():
-            feed_dict[feature_label] = np.array([state[feature_label][0] for state, reward, x, y in self.step_buffer])
-        # feed into nn
-        # run train op
-        self.sess.run(self.simple_trainer.train_op, feed_dict)
-        loss = self.sess.run(self.simple_trainer.loss, feed_dict)
-        self.losses.append(loss)
         self.step_buffer.clear()
 
     def step(self, obs):
-        # check our value/reward from  our observation
-
-        if 331 in obs.observation.available_actions:
-            if self.noop_count <= 0:
-                reward, feed_dict, episode_end = self.process_observations(obs)
-                self.episode_rewards += reward
-                outputs = self.sess.run([self.simple_net.x, self.simple_net.y], feed_dict)
-                outputs = [output[0] for output in outputs]
-                if episode_end or (len(self.step_buffer) % self.step_buffer_size == 0
-                                   and len(self.step_buffer) > 0):
-                    self.train()
-                self.step_count += 1
-                if np.random.uniform() < np.power(1 - self.epsilon, np.log(self.step_count)):
-                    outputs = np.random.randint(0, self.simple_net.resolution - 1, 2)
-                # pass in old state, x, y with reward
-                if self.previous_state:
-                    self.step_buffer.append((self.previous_state[0], self.episode_rewards,
-                                             self.previous_state[1], self.previous_state[2]))
-                # set previous state, x, y to current
-                self.previous_state = (feed_dict, outputs[0], outputs[1])
-                self.noop_count = self.noop_rate
-                return 331, [[0], outputs]
-            else:
-                self.noop_count -= 1
-                return 0, []
-        else:
-            return 7, [[0]]
+        return 7, [[0]]
 
     def process_observations(self, observation):
-        if not self.printed:
-            print('Observation.observation vars:', dir(observation.observation))
-            self.printed = True
         # is episode over?
         episode_end = (observation.step_type == environment.StepType.LAST)
         # reward
@@ -183,15 +80,15 @@ class SimpleBrain(Brain):
         for feature_label in self.feature_placeholders:
             feature = features[feature_label]
             if feature_label in ['available_actions', 'last_actions']:
-                actions = np.zeros(len(self.action_set))
+                action_inputs = np.zeros(len(self.action_set))
                 for i, action in enumerate(self.action_set):
                     if action in feature:
-                        actions[i] = 1
-                feature = actions
+                        action_inputs[i] = 1
+                feature = action_inputs
             elif feature_label in ['single_select', 'multi_select', 'cargo', 'build_queue']:
                 if feature_label in self.state_net.variable_feature_sizes:
                     padding = np.zeros(
-                        (self.state_net.variable_feature_sizes[feature_label] - len(feature), UNIT_ELEMENTS))
+                        (self.state_net.variable_feature_sizes[feature_label] - len(feature), Constants.UNIT_ELEMENTS))
                     feature = np.concatenate((feature, padding))
                 feature = feature.reshape(-1, Constants.UNIT_ELEMENTS)
             placeholder = self.feature_placeholders[feature_label]
@@ -199,6 +96,6 @@ class SimpleBrain(Brain):
         return reward, processed_features, episode_end
 
 
-class SimpleAgent(MyAgent):
+class A3CAgent(MyAgent):
     def __init__(self, name='test'):
-        super().__init__(SimpleBrain(name))
+        super().__init__(A3CBrain(name))

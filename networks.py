@@ -202,3 +202,6 @@ class A3CWorker(A3CNet):
             gradients, self.gradient_norms = tf.clip_by_global_norm(self.gradients, gradient_norm)
             global_variables = tf.trainable_variables(Constants.GLOBAL_SCOPE)
             self.apply_gradients = optimizer.apply_gradients(zip(gradients, global_variables))
+            self.pull_global_variables = [local_variable.assign(global_variable)
+                                          for local_variable, global_variable in
+                                          zip(local_variables, global_variables)]
