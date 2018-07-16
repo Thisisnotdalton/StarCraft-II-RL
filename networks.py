@@ -127,3 +127,72 @@ class A3CNet:
                         for dimension, size in enumerate(argument.sizes)
                     ]
         print_tensors(self)
+
+
+class A3CWorker(A3CNet):
+    def __init__(self, scope, state_net, rnn,
+                 value_loss_weight=0.5, policy_loss_weight=1,
+                 entropy_weight=0.01, gradient_norm=40,
+                 optimizer=tf.train.AdamOptimizer(learning_rate=0.001)):
+        super().__init__(scope, state_net, rnn)
+        with tf.variable_scope('A3C-Worker-{}'.format(scope)):
+            self.value_target = tf.placeholder(tf.float32, [None])
+            self.advantages = tf.placeholder(tf.float32, [None])
+
+            self.chosen_action = tf.placeholder(tf.int32, [None], name='ChosenAction')
+            chosen_action_one_hot = tf.one_hot(self.chosen_action,
+                                               state_net.action_size,
+                                               dtype=tf.float32,
+                                               name='ChosenActionOneHot')
+
+            responsible_action = tf.reduce_sum(self.policy * chosen_action_one_hot,
+                                               axis=[1], name='ResponsibleAction')
+            action_loss = -tf.reduce_sum(tf.log(responsible_action) * self.advantages,
+                                         name='ActionLoss')
+            entropy_action = -tf.reduce_sum(self.policy * tf.log(self.policy), name='EntropyAction')
+            self.chosen_arguments = {}
+            self.used_arguments = {}
+            zero = tf.constant(0, tf.int32, [None], 'Zero')
+            responsible_arguments = zero
+            entropy_arguments = zero
+            arguments_loss = zero
+            for argument in actions.TYPES:
+                self.chosen_arguments[argument.name] = []
+                self.used_arguments[argument.name] = []
+                for dimension, size in enumerate(argument.sizes):
+                    chosen_argument = tf.placeholder_with_default(zero,
+                                                                  name='Chosen{}[{}]'.format(argument.name,
+                                                                                             dimension))
+                    self.chosen_arguments[argument.name].append(chosen_argument)
+                    chosen_argument_one_hot = tf.one_hot(chosen_argument,
+                                                         size, dtype=tf.float32,
+                                                         name='ChosenOneHot{}[{}]'.format(argument.name,
+                                                                                          dimension))
+                    used_argument = tf.placeholder_with_default(zero,
+                                                                name='Used{}[{}]'.format(argument.name,
+                                                                                         dimension))
+                    self.used_arguments[argument.name].append(used_argument)
+                    responsible_arguments += tf.reduce_sum(used_argument * chosen_argument_one_hot *
+                                                           self.arguments[argument.name][dimension],
+                                                           axis=[1], name='Responsible{}[{}]'.format(argument.name,
+                                                                                                     dimension))
+                    arguments_loss -= tf.reduce_sum(used_argument * tf.log(responsible_arguments) * self.advantages,
+                                                    name='{}[{}]Loss'.format(argument.name,
+                                                                             dimension))
+                    entropy_arguments -= tf.reduce_sum(used_argument *
+                                                       self.arguments[argument.name][dimension] *
+                                                       tf.log(self.arguments[argument.name][dimension]),
+                                                       axis=[1], name='Entropy{}[{}]'.format(argument.name,
+                                                                                             dimension))
+            self.value_loss = tf.losses.mean_squared_error(self.value_target, self.value, scope)
+            self.entropy = entropy_action + entropy_arguments
+            self.policy_loss = action_loss + arguments_loss
+            self.loss = ((self.value_loss * value_loss_weight +
+                          self.policy_loss * policy_loss_weight) -
+                         self.entropy * entropy_weight)
+            local_variables = tf.trainable_variables(scope)
+            self.gradients = tf.gradients(self.loss, local_variables)
+            self.var_norms = tf.global_norm(local_variables)
+            gradients, self.gradient_norms = tf.clip_by_global_norm(self.gradients, gradient_norm)
+            global_variables = tf.trainable_variables(Constants.GLOBAL_SCOPE)
+            self.apply_gradients = optimizer.apply_gradients(zip(gradients, global_variables))

@@ -3,6 +3,8 @@ import numpy as np
 
 
 class Constants:
+    GLOBAL_SCOPE = 'Global'
+
     DEFAULT_ACTIONS = [
         0,  # no_op ()
         1,  # move_camera   (1/minimap [64, 64])
