@@ -57,15 +57,42 @@ class A3CBrain(Brain):
         }
         self.step_buffer_size = step_buffer_size
         self.step_buffer = []
+        self.rnn_state = self.rnn.state_init
+        self.batch_rnn_state = self.rnn_state
+        self.previous_state = None
+        self.previous_action = None
 
     def reset(self):
         self.step_buffer.clear()
+        self.rnn_state = self.rnn.state_init
+        self.batch_rnn_state = self.rnn_state
 
     def train(self):
+
         self.step_buffer.clear()
 
     def step(self, obs):
-        return 7, [[0]]
+        reward, state, episode_end = self.process_observations(obs)
+
+        state[self.rnn.state_in[0]] = self.rnn_state[0]
+        state[self.rnn.state_in[1]] = self.rnn_state[1]
+        action_dist, value_estimate, self.rnn_state = self.sess.run([self.a3c_net.policy,
+                                                                     self.a3c_net.value,
+                                                                     self.rnn.state_out],
+                                                                    feed_dict=state)
+        required_args = []
+
+        arguments = self.sess.run(required_args, state)
+        if self.previous_state:
+            self.step_buffer.append([self.previous_state, self.previous_action,
+                                     reward, state, episode_end, value_estimate])
+
+        self.previous_action = None
+        self.previous_state = state
+        if episode_end or len(self.step_buffer) > self.step_buffer_size:
+            self.train()
+
+        return 7, arguments
 
     def process_observations(self, observation):
         # is episode over?
@@ -76,7 +103,10 @@ class A3CBrain(Brain):
         features = observation.observation
         # the shapes of some features depend on the state (eg. shape of multi_select depends on number of units)
         # since tf requires fixed input shapes, we set a maximum size then pad the input if it falls short
-        processed_features = {}
+        processed_features = {
+            self.rnn.state_in[0]: self.rnn_state[0],
+            self.rnn.state_in[1]: self.rnn_state[1]
+        }
         for feature_label in self.feature_placeholders:
             feature = features[feature_label]
             if feature_label in ['available_actions', 'last_actions']:

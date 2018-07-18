@@ -30,7 +30,7 @@ def discount_rewards(rewards, gamma):
     """ take 1D float array of rewards and compute discounted reward """
     discounted_rewards = np.zeros_like(rewards)
     running_add = 0
-    for t in reversed(range(0, len(rewards))):
+    for t in reversed(range(len(rewards))):
         running_add = running_add * gamma + rewards[t]
         discounted_rewards[t] = running_add
     return discounted_rewards
